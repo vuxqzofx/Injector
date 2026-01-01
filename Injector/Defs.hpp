@@ -27,13 +27,13 @@ enum class Status {
 };
 
 struct Shared {
-    uintptr_t OriginalHeartBeat;
-    uintptr_t fLoadLibraryExA;
-    uintptr_t fRtlRestoreContext;
-    uintptr_t fNtSetInformationProcess;
-    uintptr_t fRtlAddFunctionTable;
-    uintptr_t fLoadLibraryA;
-    uintptr_t fGetProcAddress;
+    THeartBeat OriginalHeartBeat;
+    TLoadLibraryExA fLoadLibraryExA;
+    TRtlRestoreContext fRtlRestoreContext;
+    TNtSetInformationProcess fNtSetInformationProcess;
+    TRtlAddFunctionTable fRtlAddFunctionTable;
+    TLoadLibraryA fLoadLibraryA;
+    TGetProcAddress fGetProcAddress;
 
     uintptr_t dllStart;
     uintptr_t dllEnd;
@@ -49,12 +49,8 @@ struct Shared {
     uintptr_t IC;
     uintptr_t HyperionBase;
 
-    uintptr_t StringMSHTML;
-
     Status Status;
 };
-
-std::vector<BYTE> mshtml = { 0x6D, 0x73, 0x68, 0x74, 0x6D, 0x6C, 0x2E, 0x64, 0x6C, 0x6C };
 
 std::vector<BYTE> icWrapper = {
     // mov gs:[2E0], rsp

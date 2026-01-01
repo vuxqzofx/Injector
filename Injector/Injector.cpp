@@ -10,12 +10,9 @@
 
 uintptr_t HeartbeatHook(uintptr_t a1, uintptr_t a2, uintptr_t a3) {
     auto shared = (Shared*)0x100000000;
-    auto OriginalHeartBeat = (THeartBeat)shared->OriginalHeartBeat;
 
     if (shared->Status == Status::RegisterIC) {
         shared->Status = Status::Wait;
-
-        auto fNtSetInformationProcess = (TNtSetInformationProcess)shared->fNtSetInformationProcess;
 
         PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION nirvana = {};
 
@@ -23,10 +20,10 @@ uintptr_t HeartbeatHook(uintptr_t a1, uintptr_t a2, uintptr_t a3) {
         nirvana.Reserved = 0;
         nirvana.Version = 0;
 
-        fNtSetInformationProcess((HANDLE)-1, (PROCESS_INFORMATION_CLASS)ProcessInstrumentationCallback, &nirvana, sizeof(nirvana));
+        shared->fNtSetInformationProcess((HANDLE)-1, (PROCESS_INFORMATION_CLASS)ProcessInstrumentationCallback, &nirvana, sizeof(nirvana));
 
-        auto fLoadLibraryExA = (TLoadLibraryExA)shared->fLoadLibraryExA;
-        fLoadLibraryExA((LPCSTR)shared->StringMSHTML, NULL, DONT_RESOLVE_DLL_REFERENCES);
+        char mshtml[] = { 'm', 's', 'h', 't', 'm', 'l', '.', 'd', 'l', 'l', '\0'};
+        shared->fLoadLibraryExA(mshtml, NULL, DONT_RESOLVE_DLL_REFERENCES);
     }
 
     if (shared->Status == Status::InjectDLL) {
@@ -34,15 +31,11 @@ uintptr_t HeartbeatHook(uintptr_t a1, uintptr_t a2, uintptr_t a3) {
         uintptr_t exVA = shared->ExceptionVA;
         uintptr_t exSize = shared->ExceptionSize;
 
-        auto pRtlAddFunctionTable = (TRtlAddFunctionTable)shared->fRtlAddFunctionTable;
-        auto pLoadLibraryA = (TLoadLibraryA)shared->fLoadLibraryA;
-        auto pGetProcAddress = (TGetProcAddress)shared->fGetProcAddress;
-
         // SEH
         if (exVA && exSize) {
             RUNTIME_FUNCTION* table = (RUNTIME_FUNCTION*)(dllStart + exVA);
             DWORD count = (DWORD)(exSize / sizeof(RUNTIME_FUNCTION));
-            pRtlAddFunctionTable(table, count, (DWORD64)dllStart);
+            shared->fRtlAddFunctionTable(table, count, (DWORD64)dllStart);
         }
 
         // Imports
@@ -50,9 +43,11 @@ uintptr_t HeartbeatHook(uintptr_t a1, uintptr_t a2, uintptr_t a3) {
         PIMAGE_IMPORT_DESCRIPTOR importEnd = (PIMAGE_IMPORT_DESCRIPTOR)((uint8_t*)importStart + shared->ImportSize);
 
         while (importStart < importEnd && importStart->Name) {
-            HMODULE loadedDLL = pLoadLibraryA((char*)(dllStart + importStart->Name));
-            if (!loadedDLL)
+            HMODULE loadedDLL = shared->fLoadLibraryA((char*)(dllStart + importStart->Name));
+            if (!loadedDLL) {
+                ++importStart;
                 continue;
+            }
 
             uintptr_t* thunk;
             if (!importStart->OriginalFirstThunk)
@@ -64,10 +59,10 @@ uintptr_t HeartbeatHook(uintptr_t a1, uintptr_t a2, uintptr_t a3) {
 
             for (; *thunk; ++thunk, ++func) {
                 if (IMAGE_SNAP_BY_ORDINAL(*thunk))
-                    *func = pGetProcAddress(loadedDLL, MAKEINTRESOURCEA(IMAGE_ORDINAL(*thunk)));
+                    *func = shared->fGetProcAddress(loadedDLL, MAKEINTRESOURCEA(IMAGE_ORDINAL(*thunk)));
                 else {
                     IMAGE_IMPORT_BY_NAME* importByName = (IMAGE_IMPORT_BY_NAME*)(dllStart + *thunk);
-                    *func = pGetProcAddress(loadedDLL, importByName->Name);
+                    *func = shared->fGetProcAddress(loadedDLL, importByName->Name);
                 }
             }
 
@@ -76,8 +71,6 @@ uintptr_t HeartbeatHook(uintptr_t a1, uintptr_t a2, uintptr_t a3) {
 
         // TLS
         if (shared->TLSVA != 0 && shared->TLSSize != 0) {
-            uintptr_t dllStart = shared->dllStart;
-
             IMAGE_TLS_DIRECTORY64* tlsDir = (IMAGE_TLS_DIRECTORY64*)(dllStart + shared->TLSVA);
 
             ULONGLONG rawCallbacks = tlsDir->AddressOfCallBacks;
@@ -106,7 +99,7 @@ uintptr_t HeartbeatHook(uintptr_t a1, uintptr_t a2, uintptr_t a3) {
         shared->Status = Status::InjectedDLL;
     }
 
-    return OriginalHeartBeat(a1, a2, a3);
+    return shared->OriginalHeartBeat(a1, a2, a3);
 }
 
 void __stdcall InstrumentationCallback(PCONTEXT ctx) {
@@ -116,13 +109,12 @@ void __stdcall InstrumentationCallback(PCONTEXT ctx) {
     ctx->Rsp = *(uint64_t*)(currentTeb + 0x02e0);
 
     if (ctx->Rip == (shared->HyperionBase + Offsets::NtUnmapViewOfSectionSyscall))
-        ctx->Rbx = 0; // i really wanna kill myself
+        *(uintptr_t*)(ctx->Rbp + 0xA3D0) = 0;
 
     ctx->Rcx = ctx->R10;
     ctx->R10 = 0;
 
-    auto fRtlRestoreContext = (TRtlRestoreContext)shared->fRtlRestoreContext;
-    fRtlRestoreContext(ctx, nullptr);
+    shared->fRtlRestoreContext(ctx, nullptr);
 }
 
 int main() {
@@ -148,8 +140,10 @@ int main() {
     }
 
     uintptr_t devenumBase = (uintptr_t)GetModuleEntry(pid, "devenum.dll").modBaseAddr;
-    Protect(devenumBase, 0x1000, PAGE_EXECUTE_READWRITE);
+    uintptr_t icWrapperBase = devenumBase + 0x300;
+    uintptr_t icBase = devenumBase + 0x400;
 
+    Protect(devenumBase, 0x1000, PAGE_EXECUTE_READWRITE);
     std::vector<BYTE> zeros(0x1000, 0);
     Write(devenumBase, zeros.data(), zeros.size());
 
@@ -183,23 +177,20 @@ int main() {
 
     std::cout << "HeartBeat = 0x" << std::hex << heartBeatJob << "\n";
 
-    uintptr_t mshtmlStringBase = (uintptr_t)VirtualAllocEx(pHandle, 0, mshtml.size(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    Write(mshtmlStringBase, mshtml.data(), mshtml.size());
 
-    uintptr_t icWrapperBase = devenumBase + 0x300;
+    Shared localView = {};
+    localView.HyperionBase = hyperionBase;
+    localView.OriginalHeartBeat = (THeartBeat)originalHeartBeat;
+	localView.fLoadLibraryExA = (TLoadLibraryExA)GetModuleProc(kernelBase, "LoadLibraryExA");
+	localView.fRtlRestoreContext = (TRtlRestoreContext)GetModuleProc(ntDLL, "RtlRestoreContext");
+	localView.fNtSetInformationProcess = (TNtSetInformationProcess)GetModuleProc(ntDLL, "NtSetInformationProcess");
+	localView.fLoadLibraryA = (TLoadLibraryA)GetModuleProc(kernelBase, "LoadLibraryA");
+	localView.fGetProcAddress = (TGetProcAddress)GetModuleProc(kernel32, "GetProcAddress");
+	localView.fRtlAddFunctionTable = (TRtlAddFunctionTable)GetModuleProc(ntDLL, "RtlAddFunctionTable");
+    localView.IC = icWrapperBase;
 
-    WriteShared(StringMSHTML, mshtmlStringBase);
-    WriteShared(HyperionBase, hyperionBase);
-    WriteShared(OriginalHeartBeat, originalHeartBeat);
-    WriteShared(fLoadLibraryExA, GetModuleProc(kernelBase, "LoadLibraryExA"));
-    WriteShared(fRtlRestoreContext, GetModuleProc(ntDLL, "RtlRestoreContext"));
-    WriteShared(fNtSetInformationProcess, GetModuleProc(ntDLL, "NtSetInformationProcess"));
-    WriteShared(fLoadLibraryA, GetModuleProc(kernelBase, "LoadLibraryA"));
-    WriteShared(fGetProcAddress, GetModuleProc(kernel32, "GetProcAddress"));
-    WriteShared(fRtlAddFunctionTable, GetModuleProc(ntDLL, "RtlAddFunctionTable"));
-    WriteShared(IC, icWrapperBase);
+    Write(sharedMemory, &localView, sizeof(Shared));
 
-    uintptr_t icBase = devenumBase + 0x400;
 
     memcpy(&icWrapper[37], &fRtlCaptureContext, sizeof(fRtlCaptureContext));
     memcpy(&icWrapper[54], &icBase, sizeof(icBase));
