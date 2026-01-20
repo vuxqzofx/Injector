@@ -1,36 +1,67 @@
 #pragma once
-
+#include <winternl.h>
 #include <vector>
-
+#include <string>
 #include <Windows.h>
 #include <TlHelp32.h>
+
+typedef NTSTATUS(NTAPI* pNtReadVirtualMemory)(
+    HANDLE ProcessHandle,
+    PVOID BaseAddress,
+    PVOID Buffer,
+    ULONG NumberOfBytesToRead,
+    PULONG NumberOfBytesRead
+    );
+
+typedef NTSTATUS(NTAPI* pNtWriteVirtualMemory)(
+    HANDLE ProcessHandle,
+    PVOID BaseAddress,
+    PVOID Buffer,
+    ULONG NumberOfBytesToWrite,
+    PULONG NumberOfBytesWritten
+    );
+
+typedef NTSTATUS(NTAPI* pNtProtectVirtualMemory)(
+    HANDLE ProcessHandle,
+    PVOID* BaseAddress,
+    PSIZE_T RegionSize,
+    ULONG NewProtect,
+    PULONG OldProtect
+    );
 
 HANDLE pHandle;
 DWORD oldP;
 
+static pNtReadVirtualMemory NtReadVM = (pNtReadVirtualMemory)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtReadVirtualMemory");
+static pNtWriteVirtualMemory NtWriteVM = (pNtWriteVirtualMemory)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtWriteVirtualMemory");
+static pNtProtectVirtualMemory NtProtectVM = (pNtProtectVirtualMemory)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtProtectVirtualMemory");
+
 template<typename T>
 T Read(uintptr_t address) {
     T buffer{};
-    ReadProcessMemory(pHandle, (LPCVOID)address, &buffer, sizeof(T), nullptr);
-
+    NtReadVM(pHandle, (PVOID)address, &buffer, sizeof(T), nullptr);
     return buffer;
 }
 
 bool Read(uintptr_t address, void* outBuffer, size_t size) {
-    return ReadProcessMemory(pHandle, (LPCVOID)address, outBuffer, size, nullptr);
+    return NtReadVM(pHandle, (PVOID)address, outBuffer, (ULONG)size, nullptr) == 0;
 }
 
 template<typename T>
 bool Write(uintptr_t address, const T& value) {
-    return WriteProcessMemory(pHandle, (LPVOID)address, &value, sizeof(T), nullptr);
+    return NtWriteVM(pHandle, (PVOID)address, (PVOID)&value, sizeof(T), nullptr) == 0;
 }
 
 bool Write(uintptr_t address, const void* buffer, size_t size) {
-    return WriteProcessMemory(pHandle, (LPVOID)address, buffer, size, nullptr);
+    return NtWriteVM(pHandle, (PVOID)address, (PVOID)buffer, (ULONG)size, nullptr) == 0;
 }
 
 bool Protect(uintptr_t address, SIZE_T size, DWORD newProtection) {
-    return VirtualProtectEx(pHandle, (LPVOID)address, size, newProtection, &oldP);
+    PVOID base = (PVOID)address;
+    ULONG oldProtection = 0;
+    NTSTATUS status = NtProtectVM(pHandle, &base, &size, newProtection, &oldProtection);
+    oldP = oldProtection;
+    return status == 0;
 }
 
 DWORD GetPID(const char* exeName) {
@@ -118,9 +149,9 @@ uintptr_t GetHeartBeat(uintptr_t jobs) {
 
         int jobNameSize = Read<int>(job + 0x28);
         if (jobNameSize < 16) {
-            std::string jobName = Read<std::string>(job + 0x18);
-            if (jobName == "Heartbeat")
-                return job;
+            char jobName[16];
+            Read(job + 0x18, jobName, 16);
+            if (strcmp(jobName, "Heartbeat") == 0) return job;
         }
     }
 
@@ -153,7 +184,7 @@ void ReplaceShellcode(std::vector<BYTE>& data, uint64_t searchValue, uint64_t re
             uint64_t imm = *(uint64_t*)(&data[i + 2]);
             uint32_t offset = *(uint32_t*)(&data[i + 2]);
             if (imm - offset == searchValue) {
-                uintptr_t newValue = replaceValue + offset;
+                uintptr_t newValue = (uintptr_t)replaceValue + offset;
                 memcpy(&data[i + 2], &newValue, sizeof(newValue));
             }
         }
