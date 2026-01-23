@@ -109,7 +109,7 @@ void __stdcall InstrumentationCallback(PCONTEXT ctx) {
     ctx->Rsp = *(uint64_t*)(currentTeb + 0x02e0);
 
     if (ctx->Rip == (shared->HyperionBase + Offsets::NtUnmapViewOfSectionSyscall))
-        *(uintptr_t*)(ctx->Rbp + 0x1000) = 0;
+        *(uintptr_t*)(ctx->Rbp + 0xEC0) = 0;
 
     ctx->Rcx = ctx->R10;
     ctx->R10 = 0;
